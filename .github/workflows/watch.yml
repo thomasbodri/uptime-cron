@@ -1,0 +1,89 @@
+# An uptime check that does not run on the machine it is watching.
+#
+# WHY THIS REPO IS PUBLIC. GitHub meters Actions minutes on private repositories, and a
+# check running around the clock would spend the whole monthly allowance — which is also
+# what deployments run on, so the watchdog would take them down with it. Public
+# repositories get standard runners free and unmetered. That is the only reason, and it is
+# why nothing identifying is written down here.
+#
+# PUBLIC REPOSITORY MEANS PUBLIC WORKFLOW LOGS. Anyone can read the output of these runs.
+# GitHub masks the exact text of a secret, and nothing else — a hostname inside a curl error
+# is not masked, because the error string is not equal to the secret. So:
+#   * every identifying value is a secret, the target URL included;
+#   * curl runs quiet, and its stderr is dropped rather than printed;
+#   * no response body is ever echoed;
+#   * no `set -x`.
+# The log of a healthy run says "ok" and nothing else.
+#
+# NO ACTIONS ARE USED, not even actions/checkout. Nothing is checked out, so there is no
+# third-party code in this workflow at all and nothing to pin, audit or keep updated.
+#
+# TRIGGERS ARE schedule AND workflow_dispatch ONLY. `pull_request_target` would hand these
+# secrets to code written in somebody else's fork; it must never appear in this file.
+
+name: watch
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe, twice, then decide
+        env:
+          TARGET_URL: ${{ secrets.TARGET_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set -eu
+
+          # A 200 is not proof. Cloudflare can serve a cached or Always-Online copy of a page
+          # whose origin is gone, so the pass condition is the application's own JSON body.
+          probe() {
+            body=$(curl -s --max-time 15 -H 'cache-control: no-cache' "$TARGET_URL" 2>/dev/null || true)
+            case "$body" in
+              *'"status":"ok"'*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Twice, thirty seconds apart. One refused connection is a blip; two is an outage.
+          # Both attempts are inside ONE run, so this stays stateless — see below.
+          if probe; then echo "ok"; exit 0; fi
+          echo "first probe failed, retrying in 30s"
+          sleep 30
+          if probe; then echo "ok on the second attempt"; exit 0; fi
+
+          # THERE IS NO STATE BETWEEN RUNS, AND THAT IS DELIBERATE. Remembering "already
+          # alerted" needs somewhere to write, and every option — a commit, a variable, a
+          # cache — either needs a write token in a public repo or leaves outage times in
+          # public history. So the message repeats every ten minutes while it is down and
+          # says so, and RECOVERY IS SILENCE. The weekly heartbeat is what makes silence
+          # mean something.
+          echo "both probes failed - alerting"
+
+          # THE SEND IS CHECKED. A wrong token, a bot removed from the chat or a revoked
+          # chat id all answer 200-with-"ok":false, so discarding the response gives a green
+          # run and no message: a watchdog that has quietly stopped watching, which is the
+          # one failure this whole thing exists to avoid. The response is INSPECTED, never
+          # echoed — it contains the chat and the message back.
+          sent=$(curl -s --max-time 15 \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=DOWN: the app did not answer with status ok, twice, 30s apart. This repeats every 10 minutes until it recovers; recovery is silence." \
+            2>/dev/null || true)
+          case "$sent" in
+            *'"ok":true'*) echo "alert delivered" ;;
+            *) echo "ALERT NOT DELIVERED - Telegram refused the send"; exit 1 ;;
+          esac
+          exit 1

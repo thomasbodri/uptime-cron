@@ -1,0 +1,38 @@
+# Nothing watches the watchdog: a deleted workflow, a disabled schedule and a healthy month
+# are the same observation — silence. This is what makes the silence mean something.
+#
+# It also keeps the schedule alive. GitHub DISABLES scheduled workflows in a repository with
+# no activity for 60 days, and the notice is an email nobody re-reads. A weekly line in the
+# chat is the reminder that this repository exists.
+
+name: heartbeat
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  say-alive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: One line, once a week
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set -eu
+          # Checked, not fired and forgotten — see watch.yml. This weekly line is the only
+          # evidence the credentials still work, so a refused send has to be loud.
+          sent=$(curl -s --max-time 15 \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=Uptime check alive. If this line stops arriving, the check stopped - not the site." \
+            2>/dev/null || true)
+          case "$sent" in
+            *'"ok":true'*) echo "heartbeat delivered" ;;
+            *) echo "HEARTBEAT NOT DELIVERED - Telegram refused the send"; exit 1 ;;
+          esac
