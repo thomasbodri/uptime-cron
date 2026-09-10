@@ -72,6 +72,15 @@ jobs:
           # mean something.
           echo "both probes failed - alerting"
 
+          # THE PREFIX IS THE ROUTING. There is ONE notification channel, by a decision taken
+          # in May 2026 after a three-channel split (OK / Problem / Alert) was dismantled: the
+          # success channel had become noise and nobody read it. So priority is carried by the
+          # leading emoji, not by the destination - red for critical, green for healthy. This
+          # message is the most important one the channel ever carries and was the only one
+          # arriving unmarked, which made it look like routine traffic in a scrollback. Moving
+          # it to a channel of its own would rebuild the structure that was deliberately taken
+          # apart, and would put the page somewhere nobody habitually looks.
+          #
           # THE SEND IS CHECKED. A wrong token, a bot removed from the chat or a revoked
           # chat id all answer 200-with-"ok":false, so discarding the response gives a green
           # run and no message: a watchdog that has quietly stopped watching, which is the
@@ -80,7 +89,7 @@ jobs:
           sent=$(curl -s --max-time 15 \
             "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" \
-            --data-urlencode "text=DOWN: the app did not answer with status ok, twice, 30s apart. This repeats every 10 minutes until it recovers; recovery is silence." \
+            --data-urlencode "text=🔴 DOWN: the app did not answer with status ok, twice, 30s apart. This repeats every 10 minutes until it recovers; recovery is silence." \
             2>/dev/null || true)
           case "$sent" in
             *'"ok":true'*) echo "alert delivered" ;;
