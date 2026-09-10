@@ -30,7 +30,7 @@ jobs:
           sent=$(curl -s --max-time 15 \
             "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" \
-            --data-urlencode "text=Uptime check alive. If this line stops arriving, the check stopped - not the site." \
+            --data-urlencode "text=🟢 Uptime check alive. If this line stops arriving, the check stopped - not the site." \
             2>/dev/null || true)
           case "$sent" in
             *'"ok":true'*) echo "heartbeat delivered" ;;
