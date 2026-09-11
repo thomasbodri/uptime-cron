@@ -18,6 +18,18 @@
 # NO ACTIONS ARE USED, not even actions/checkout. Nothing is checked out, so there is no
 # third-party code in this workflow at all and nothing to pin, audit or keep updated.
 #
+# ONE RUN WATCHES FOR AN HOUR, because the cron line is a request, not a promise.
+# `*/10` asks for 144 runs a day. GitHub's scheduler is best-effort and drops most
+# high-frequency ticks on a free public repo: MEASURED over the 24h to 2026-09-10 11:46 UTC,
+# SEVEN runs, median gap 3.5h, worst gap 5.1h. Two probes thirty seconds apart every few hours
+# is not a watchdog, and nothing said so -- a throttled watchdog and a healthy one both produce
+# silence, which is the one failure this repo exists to rule out.
+#
+# The scheduler cannot be argued with, so the RUN got longer instead: it keeps probing every
+# two minutes for about fifty-five minutes and then exits. Coverage goes from a couple of
+# seconds per gap to roughly an hour in every three or four. Runner minutes are free and
+# unmetered on a public repo, which is the same reason this repo is public at all.
+#
 # TRIGGERS ARE schedule AND workflow_dispatch ONLY. `pull_request_target` would hand these
 # secrets to code written in somebody else's fork; it must never appear in this file.
 
@@ -37,9 +49,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 65
     steps:
-      - name: Probe, twice, then decide
+      - name: Watch for an hour
         env:
           TARGET_URL: ${{ secrets.TARGET_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -57,42 +69,61 @@ jobs:
             esac
           }
 
-          # Twice, thirty seconds apart. One refused connection is a blip; two is an outage.
-          # Both attempts are inside ONE run, so this stays stateless — see below.
-          if probe; then echo "ok"; exit 0; fi
-          echo "first probe failed, retrying in 30s"
-          sleep 30
-          if probe; then echo "ok on the second attempt"; exit 0; fi
+          # HOW LONG ONE RUN WATCHES, and how often. 55 minutes at a 2-minute cadence is 27
+          # probe rounds; the job's own timeout is 65 so the loop always ends itself rather
+          # than being killed halfway through deciding something.
+          WINDOW_SECONDS=3300
+          EVERY=120
+          RE_ALERT_SECONDS=600
 
-          # THERE IS NO STATE BETWEEN RUNS, AND THAT IS DELIBERATE. Remembering "already
-          # alerted" needs somewhere to write, and every option — a commit, a variable, a
-          # cache — either needs a write token in a public repo or leaves outage times in
-          # public history. So the message repeats every ten minutes while it is down and
-          # says so, and RECOVERY IS SILENCE. The weekly heartbeat is what makes silence
-          # mean something.
-          echo "both probes failed - alerting"
+          started=$(date +%s)
+          fails=0
+          alerted_at=0
+          exit_code=0
 
-          # THE PREFIX IS THE ROUTING. There is ONE notification channel, by a decision taken
-          # in May 2026 after a three-channel split (OK / Problem / Alert) was dismantled: the
-          # success channel had become noise and nobody read it. So priority is carried by the
-          # leading emoji, not by the destination - red for critical, green for healthy. This
-          # message is the most important one the channel ever carries and was the only one
-          # arriving unmarked, which made it look like routine traffic in a scrollback. Moving
-          # it to a channel of its own would rebuild the structure that was deliberately taken
-          # apart, and would put the page somewhere nobody habitually looks.
-          #
-          # THE SEND IS CHECKED. A wrong token, a bot removed from the chat or a revoked
-          # chat id all answer 200-with-"ok":false, so discarding the response gives a green
-          # run and no message: a watchdog that has quietly stopped watching, which is the
-          # one failure this whole thing exists to avoid. The response is INSPECTED, never
-          # echoed — it contains the chat and the message back.
-          sent=$(curl -s --max-time 15 \
-            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TG_CHAT_ID}" \
-            --data-urlencode "text=🔴 DOWN: the app did not answer with status ok, twice, 30s apart. This repeats every 10 minutes until it recovers; recovery is silence." \
-            2>/dev/null || true)
-          case "$sent" in
-            *'"ok":true'*) echo "alert delivered" ;;
-            *) echo "ALERT NOT DELIVERED - Telegram refused the send"; exit 1 ;;
-          esac
-          exit 1
+          # THE SEND IS CHECKED. A wrong token, a bot removed from the chat or a revoked chat
+          # id all answer 200-with-"ok":false, so discarding the response gives a green run and
+          # no message: a watchdog that has quietly stopped watching, which is the one failure
+          # this whole thing exists to avoid. The response is INSPECTED, never echoed -- it
+          # contains the chat and the message back.
+          announce() {
+            sent=$(curl -s --max-time 15 \
+              "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT_ID}" \
+              --data-urlencode "text=$1" \
+              2>/dev/null || true)
+            case "$sent" in
+              *'"ok":true'*) echo "alert delivered" ;;
+              *) echo "ALERT NOT DELIVERED - Telegram refused the send"; return 1 ;;
+            esac
+          }
+
+          while :; do
+            now=$(date +%s)
+            [ $((now - started)) -ge "$WINDOW_SECONDS" ] && break
+
+            if probe; then
+              # RECOVERY IS SILENCE, still. There is no state between runs, so an "it is back"
+              # message could only ever describe this run's own window; the weekly heartbeat is
+              # what makes silence mean something, and that has not changed.
+              fails=0
+              alerted_at=0
+            else
+              fails=$((fails + 1))
+              # One miss is a blip. Two consecutive misses, two minutes apart, is an outage.
+              if [ "$fails" -ge 2 ]; then
+                if [ "$alerted_at" -eq 0 ] || [ $((now - alerted_at)) -ge "$RE_ALERT_SECONDS" ]; then
+                  announce "🔴 DOWN: the app did not answer with status ok, twice, $((EVERY))s apart. This repeats every $((RE_ALERT_SECONDS / 60)) minutes until it recovers; recovery is silence." \
+                    || exit_code=1
+                  alerted_at=$now
+                  exit_code=1
+                fi
+              fi
+            fi
+            sleep "$EVERY"
+          done
+
+          # The run's verdict is about what it SAW, not about how it ended: a window that paged
+          # is a failed run in the Actions list, which is where somebody looks afterwards.
+          if [ "$exit_code" -eq 0 ]; then echo "ok - window closed with no outage"; fi
+          exit "$exit_code"
