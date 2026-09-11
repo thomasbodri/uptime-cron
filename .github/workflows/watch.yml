@@ -30,6 +30,25 @@
 # seconds per gap to roughly an hour in every three or four. Runner minutes are free and
 # unmetered on a public repo, which is the same reason this repo is public at all.
 #
+# EACH RUN STARTS THE NEXT ONE. An hour in every three or four is still two or three unwatched
+# hours in a row, several times a day. So when a window closes, the run asks the API to
+# dispatch this same workflow again. The scheduler's throttling does not apply to a
+# dispatch: `workflow_dispatch` and `repository_dispatch` are the two events GitHub lets a
+# run trigger with its own GITHUB_TOKEN. The cron line stays, as the thing that restarts the
+# chain after anything breaks it -- a failed dispatch call, a GitHub outage, a runner that
+# never came up. `concurrency` keeps the chain single: while a run is in progress at most one
+# more waits, and a newer waiting run replaces an older one, so a cron tick that lands
+# mid-window is simply superseded by the hand-over and shows as "cancelled" in the list.
+# That is the normal look of this repo, not a fault.
+#
+# TO STOP THE CHAIN, disable the workflow in the Actions tab. A disabled workflow refuses the
+# dispatch, the running window ends, and nothing restarts it. Deleting the cron line alone
+# would NOT stop it.
+#
+# `permissions.actions: write` is the one right the token holds, and only so it can make that
+# dispatch call. No third-party code runs here, so nothing can read it but this shell, and
+# this shell never prints it.
+#
 # TRIGGERS ARE schedule AND workflow_dispatch ONLY. `pull_request_target` would hand these
 # secrets to code written in somebody else's fork; it must never appear in this file.
 
@@ -39,8 +58,14 @@ on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      window_seconds:
+        description: "How long this run watches (seconds). Only for testing the hand-over; a chained run always uses the default."
+        required: false
+        default: "3300"
 
-permissions: {}
+permissions:
+  actions: write
 
 concurrency:
   group: watch
@@ -56,6 +81,10 @@ jobs:
           TARGET_URL: ${{ secrets.TARGET_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          WINDOW_SECONDS_INPUT: ${{ github.event.inputs.window_seconds }}
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_URL: ${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/watch.yml/dispatches
+          DISPATCH_REF: ${{ github.ref_name }}
         run: |
           set -eu
 
@@ -72,7 +101,8 @@ jobs:
           # HOW LONG ONE RUN WATCHES, and how often. 55 minutes at a 2-minute cadence is 27
           # probe rounds; the job's own timeout is 65 so the loop always ends itself rather
           # than being killed halfway through deciding something.
-          WINDOW_SECONDS=3300
+          WINDOW_SECONDS="${WINDOW_SECONDS_INPUT:-3300}"
+          case "$WINDOW_SECONDS" in ''|*[!0-9]*) WINDOW_SECONDS=3300 ;; esac
           EVERY=120
           RE_ALERT_SECONDS=600
 
@@ -122,6 +152,21 @@ jobs:
             fi
             sleep "$EVERY"
           done
+
+          # HAND OVER before reporting, whatever this window saw: an outage is exactly when the
+          # next window matters most. A 204 is the only success. Anything else is said out loud
+          # (status only -- the body can name the repository) and the cron line takes over; the
+          # chain is then a few hours from restarting instead of never.
+          dispatched=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            -X POST "$DISPATCH_URL" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"ref\":\"${DISPATCH_REF}\"}" 2>/dev/null || echo "000")
+          if [ "$dispatched" = "204" ]; then
+            echo "next window requested"
+          else
+            echo "NEXT WINDOW NOT REQUESTED - dispatch answered ${dispatched}; the schedule will restart the chain"
+          fi
 
           # The run's verdict is about what it SAW, not about how it ended: a window that paged
           # is a failed run in the Actions list, which is where somebody looks afterwards.
