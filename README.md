@@ -17,7 +17,11 @@ stay that way.
   from silence because nothing is wrong.
 * `secret-scan.yml` — gitleaks reads the whole history of every branch on each pull request,
   each push to `main` and on demand, and fails if a key-shaped string was ever committed. It
-  holds no secrets and can only read the repository. Findings are printed redacted.
+  uses gitleaks' default rules, which skip some paths entirely: lock files
+  (`package-lock.json`, `yarn.lock` and the like), `node_modules/`, images including SVG,
+  fonts and office documents. This repository holds only YAML and this README, so none of
+  those exist here. The scan holds no secrets and can only read the repository. Findings are
+  printed redacted.
 
 No third-party actions are used. `watch.yml` and `heartbeat.yml` use no actions at all;
 `secret-scan.yml` uses GitHub's own `actions/checkout`, pinned to a full commit SHA.
