@@ -15,5 +15,9 @@ stay that way.
   "cancelled", which is normal. To stop everything, disable the workflow in the Actions tab.
 * `heartbeat.yml` — one line a week, so that silence from this repository is distinguishable
   from silence because nothing is wrong.
+* `secret-scan.yml` — gitleaks reads the whole history of every branch on each pull request,
+  each push to `main` and on demand, and fails if a key-shaped string was ever committed. It
+  holds no secrets and can only read the repository. Findings are printed redacted.
 
-No third-party actions are used.
+No third-party actions are used. `watch.yml` and `heartbeat.yml` use no actions at all;
+`secret-scan.yml` uses GitHub's own `actions/checkout`, pinned to a full commit SHA.
